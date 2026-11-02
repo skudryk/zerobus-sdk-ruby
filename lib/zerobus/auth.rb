@@ -48,65 +48,106 @@ module Zerobus
     private
 
     def fetch_token(now)
-      catalog, schema, = @table.split('.')
-      details = [['CATALOG', catalog, ['USE CATALOG']],
-                 ['SCHEMA', "#{catalog}.#{schema}", ['USE SCHEMA']],
-                 ['TABLE', @table, ['SELECT', 'MODIFY']]].map do |kind, path, privileges|
-        item = {type: 'unity_catalog_privileges', object_type: kind, object_full_path: path, privileges: privileges}
-        item[:operations] = ['zerobuswrite'] if kind == 'TABLE'
-        item
-      end
-      form = {scope: 'all-apis', resource: "api://databricks/workspaces/#{@workspace}/zerobusDirectWriteApi",
-              authorization_details: JSON.generate(details)}
-      request_headers = {}
-      subject = nil
-      if @auth
-        subject = @auth.idp_token_supplier.call
-        raise ArgumentError, 'IdP token supplier must return a nonempty String' unless subject.is_a?(String) && !subject.strip.empty?
-        form.merge!(grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange', subject_token: subject,
-                    subject_token_type: 'urn:ietf:params:oauth:token-type:jwt')
-        form[:client_id] = @auth.databricks_client_id if @auth.databricks_client_id
-      else
-        form[:grant_type] = 'client_credentials'
-        request_headers['authorization'] = "Basic #{Base64.strict_encode64("#{@client_id}:#{@client_secret}")}"
-      end
-      request_headers['content-type'] = 'application/x-www-form-urlencoded'
-      response = Typhoeus.post(@endpoint.to_s, body: URI.encode_www_form(form), headers: request_headers,
-                               connecttimeout_ms: 15_000, timeout_ms: 15_000, followlocation: false,
-                               ssl_verifypeer: true, ssl_verifyhost: 2)
-      raise ZerobusException, "OAuth transport failed: #{response.return_code}" unless response.return_code == :ok
-      code = response.code
-      unless code.between?(200, 299)
-        error = [408, 429].include?(code) || code >= 500 ? ZerobusException : NonRetriableException
-        raise error, "OAuth token endpoint returned HTTP #{code}"
-      end
-      body = JSON.parse(response.body)
-      token = body['access_token']
-      raise NonRetriableException, 'OAuth response missing a usable access_token' unless token.is_a?(String) && !token.empty? && token.ascii_only? && !token.match?(/[\x00-\x20\x7f]/)
-      ttl = begin
-        Float(body.fetch('expires_in', 0))
-      rescue ArgumentError, TypeError
-        0
-      end
-      ttl = 0 unless ttl.finite? && ttl.positive?
-      if subject
-        begin
-          payload = subject.split('.')[1]
-          exp = JSON.parse(Base64.urlsafe_decode64(payload + '=' * ((4 - payload.length % 4) % 4)))['exp']
-          if exp
-            remaining = Float(exp) - Time.now.to_f
-            raise NonRetriableException, 'IdP token already expired' unless remaining.positive?
-            ttl = [ttl, remaining].min
-          end
-        rescue ArgumentError, TypeError, NoMethodError, JSON::ParserError
-          # Opaque subject tokens cannot contribute an expiry cap.
-        end
-      end
+      subject = idp_subject_token
+      body = request_token(subject)
+      token = access_token(body)
+      ttl = token_ttl(body, subject)
+
       @token = token
       @expires_at = now + ttl
       @refresh_at = now + [ttl - 300, ttl * 0.8].max
     rescue JSON::ParserError
       raise NonRetriableException, 'invalid OAuth token response'
+    end
+
+    def idp_subject_token
+      return nil unless @auth
+
+      subject = @auth.idp_token_supplier.call
+      unless subject.is_a?(String) && !subject.strip.empty?
+        raise ArgumentError, 'IdP token supplier must return a nonempty String'
+      end
+      subject
+    end
+
+    def authorization_details
+      catalog, schema, = @table.split('.')
+      [['CATALOG', catalog, ['USE CATALOG']],
+       ['SCHEMA', "#{catalog}.#{schema}", ['USE SCHEMA']],
+       ['TABLE', @table, ['SELECT', 'MODIFY']]].map do |kind, path, privileges|
+        item = {type: 'unity_catalog_privileges', object_type: kind, object_full_path: path, privileges: privileges}
+        item[:operations] = ['zerobuswrite'] if kind == 'TABLE'
+        item
+      end
+    end
+
+    def token_request_form(subject)
+      form = {scope: 'all-apis', resource: "api://databricks/workspaces/#{@workspace}/zerobusDirectWriteApi",
+              authorization_details: JSON.generate(authorization_details)}
+      return form.merge(grant_type: 'client_credentials') unless @auth
+
+      form.merge!(grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange', subject_token: subject,
+                  subject_token_type: 'urn:ietf:params:oauth:token-type:jwt')
+      form[:client_id] = @auth.databricks_client_id if @auth.databricks_client_id
+      form
+    end
+
+    def token_request_headers
+      headers = {'content-type' => 'application/x-www-form-urlencoded'}
+      headers['authorization'] = "Basic #{Base64.strict_encode64("#{@client_id}:#{@client_secret}")}" unless @auth
+      headers
+    end
+
+    def request_token(subject)
+      response = Typhoeus.post(@endpoint.to_s, body: URI.encode_www_form(token_request_form(subject)),
+                               headers: token_request_headers, connecttimeout_ms: 15_000, timeout_ms: 15_000,
+                               followlocation: false, ssl_verifypeer: true, ssl_verifyhost: 2)
+      validate_token_response(response)
+      JSON.parse(response.body)
+    end
+
+    def validate_token_response(response)
+      raise ZerobusException, "OAuth transport failed: #{response.return_code}" unless response.return_code == :ok
+
+      code = response.code
+      return if code.between?(200, 299)
+
+      error = [408, 429].include?(code) || code >= 500 ? ZerobusException : NonRetriableException
+      raise error, "OAuth token endpoint returned HTTP #{code}"
+    end
+
+    def access_token(body)
+      token = body['access_token']
+      unless token.is_a?(String) && !token.empty? && token.ascii_only? && !token.match?(/[\x00-\x20\x7f]/)
+        raise NonRetriableException, 'OAuth response missing a usable access_token'
+      end
+      token
+    end
+
+    def token_ttl(body, subject)
+      ttl = expires_in(body)
+      remaining = subject_token_lifetime(subject) if subject
+      remaining ? [ttl, remaining].min : ttl
+    end
+
+    def expires_in(body)
+      ttl = Float(body.fetch('expires_in', 0))
+      ttl.finite? && ttl.positive? ? ttl : 0
+    rescue ArgumentError, TypeError
+      0
+    end
+
+    def subject_token_lifetime(subject)
+      payload = subject.split('.')[1]
+      exp = JSON.parse(Base64.urlsafe_decode64(payload + '=' * ((4 - payload.length % 4) % 4)))['exp']
+      return nil unless exp
+
+      remaining = Float(exp) - Time.now.to_f
+      raise NonRetriableException, 'IdP token already expired' unless remaining.positive?
+      remaining
+    rescue ArgumentError, TypeError, NoMethodError, JSON::ParserError
+      # Opaque subject tokens cannot contribute an expiry cap.
+      nil
     end
   end
 end

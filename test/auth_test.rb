@@ -74,12 +74,55 @@ class AuthTest < Minitest::Test
     end
     with_post_stub(response(return_code: :couldnt_connect)) { assert_raises(Zerobus::ZerobusException) { provider.get_headers } }
   end
-  def test_no_expiry_is_not_cached
+  def test_unusable_expiry_is_not_cached
+    [nil, 'invalid', 0, -1, 'Infinity', {}].each do |expiry|
+      calls = 0
+      with_post_stub(->(*_) { calls += 1; response(expires_in: expiry) }) do
+        p = provider
+        2.times { p.get_headers }
+        assert_equal 2, calls, "unexpected cache hit for expires_in=#{expiry.inspect}"
+      end
+    end
+  end
+  def test_invalid_response_json_is_non_retryable
+    malformed = Typhoeus::Response.new(code: 200, return_code: :ok, body: '{broken')
+    with_post_stub(malformed) do
+      error = assert_raises(Zerobus::NonRetriableException) { provider.get_headers }
+      assert_equal 'invalid OAuth token response', error.message
+    end
+  end
+  def test_invalid_subject_supplier_is_rejected_before_request
+    [nil, 42, '', '   '].each do |subject|
+      auth = Zerobus::FederatedToken.new(idp_token_supplier: -> { subject })
+      with_post_stub(->(*) { flunk 'invalid subject must not be sent' }) do
+        assert_raises(ArgumentError) { provider(auth: auth).get_headers }
+      end
+    end
+  end
+  def test_malformed_subject_expiry_does_not_prevent_caching
+    ['opaque-token', 'header.!!!.sig', "header.#{Base64.urlsafe_encode64('{broken', padding: false)}.sig"].each do |subject|
+      calls = 0
+      auth = Zerobus::FederatedToken.new(idp_token_supplier: -> { subject })
+      with_post_stub(->(*) { calls += 1; response }) do
+        p = provider(auth: auth)
+        2.times { p.get_headers }
+        assert_equal 1, calls
+      end
+    end
+  end
+  def test_subject_expiry_caps_refresh_time
+    payload = Base64.urlsafe_encode64(JSON.generate(exp: 1010), padding: false)
+    auth = Zerobus::FederatedToken.new(idp_token_supplier: -> { "header.#{payload}.sig" })
     calls = 0
-    with_post_stub(->(*_) { calls += 1; response(expires_in: nil) }) do
-      p = provider
-      2.times { p.get_headers }
-      assert_equal 2, calls
+    p = provider(auth: auth)
+    with_post_stub(->(*) { calls += 1; response(expires_in: 3600) }) do
+      Time.stub(:now, Time.at(1000)) do
+        Process.stub(:clock_gettime, 100) { p.get_headers }
+        Process.stub(:clock_gettime, 107) { p.get_headers }
+        assert_equal 1, calls
+        Process.stub(:clock_gettime, 108) { p.get_headers }
+        assert_equal 2, calls
+      end
     end
   end
   def test_transient_refresh_failure_uses_still_valid_token

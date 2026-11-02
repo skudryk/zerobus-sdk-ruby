@@ -39,6 +39,7 @@ module Zerobus
   end
 
   class StreamConfigurationOptions
+
     DEFAULTS = {
       max_inflight_records: 1_000_000, recovery: true, recovery_timeout_ms: 15_000,
       recovery_backoff_ms: 2_000, recovery_retries: 4, server_lack_of_ack_timeout_ms: 60_000,
@@ -46,10 +47,13 @@ module Zerobus
       stream_paused_max_wait_time_ms: nil, callback_max_wait_time_ms: 5_000,
       ack_callback: nil, max_ingest_payload_bytes: 10 * 1024 * 1024 - 64 * 1024
     }.freeze
+
     DEFAULTS.each_key { |key| attr_reader key }
+
     def initialize(**options)
       unknown = options.keys - DEFAULTS.keys
       raise ArgumentError, "unknown options: #{unknown.join(', ')}" unless unknown.empty?
+
       DEFAULTS.merge(options).each do |key, value|
         if key.to_s.end_with?('_ms', '_bytes') || [:max_inflight_records, :recovery_retries].include?(key)
           nullable = [:stream_paused_max_wait_time_ms, :callback_max_wait_time_ms].include?(key)
@@ -58,6 +62,7 @@ module Zerobus
         end
         instance_variable_set("@#{key}", value)
       end
+
       raise ArgumentError, 'recovery must be boolean' unless [true, false].include?(@recovery)
       raise ArgumentError, 'invalid record_type' unless [0, 1, 2].include?(@record_type)
       freeze
