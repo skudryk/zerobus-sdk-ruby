@@ -1,9 +1,9 @@
-# zerobus-sdk-ruby-sdk
+# Databricks ZeroBus Ruby SDK
 
-A standalone Ruby SDK for Databricks Zerobus gem
+A standalone Ruby SDK for Databricks Zerobus gem.
 It was ported from official Databricks Python SDK (https://github.com/databricks/zerobus-sdk).
 
-All SDK logic is Ruby based; ingestion and OAuth use **Typhoeus and libcurl**.
+All SDK logic is Ruby based, ingestion and OAuth use **Typhoeus and libcurl**.
 
 Typhoeus uses Ethon/FFI and a system libcurl, so the complete dependency stack
 includes native libraries. Each stream owns a libcurl multi/easy pair.
