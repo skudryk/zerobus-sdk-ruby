@@ -1,0 +1,11 @@
+# frozen_string_literal: true
+require_relative 'zerobus/version'
+require_relative 'zerobus/configuration'
+require_relative 'zerobus/protocol'
+require_relative 'zerobus/transport'
+require_relative 'zerobus/auth'
+require_relative 'zerobus/encoder'
+require_relative 'zerobus/stream'
+require_relative 'zerobus/persistent_stream_builder'
+require_relative 'zerobus/sdk'
+require_relative 'zerobus/async'

@@ -1,0 +1,135 @@
+syntax = "proto2";
+
+import "google/protobuf/duration.proto";
+package databricks.zerobus;
+
+// Ruby SDK's supported subset of rust/sdk/zerobus_service.proto.
+// Keep all field numbers and RPC paths compatible with the canonical service.
+service Zerobus {
+  rpc EphemeralStream(stream EphemeralStreamRequest) returns (stream EphemeralStreamResponse);
+  // Experimental persistent-stream API.
+  rpc PersistentStream(stream PersistentStreamRequest) returns (stream PersistentStreamResponse);
+  rpc RetireStream(RetireStreamRequest) returns (RetireStreamResponse);
+}
+
+enum RecordType {
+  RECORD_TYPE_UNSPECIFIED = 0;
+  PROTO = 1;
+  JSON = 2;
+  reserved 3, 4;
+}
+
+message JsonRecordBatch {
+  repeated string records = 1;
+}
+
+message ProtoEncodedRecordBatch {
+  repeated bytes records = 1;
+}
+
+message CreateIngestStreamRequest {
+  optional string table_name = 1;
+  reserved 2, 5;
+  reserved "stream_id";
+  optional bytes descriptor_proto = 3;
+  optional RecordType record_type = 4;
+}
+
+message CreateIngestStreamResponse {
+  optional string stream_id = 1;
+  reserved 2;
+  reserved "last_offset_id";
+}
+
+message IngestRecordRequest {
+  optional int64 offset_id = 1;
+  reserved 4;
+  oneof record {
+    bytes proto_encoded_record = 2;
+    string json_record = 3;
+  }
+}
+
+message IngestRecordBatchRequest {
+  optional int64 offset_id = 1;
+  reserved 4;
+  oneof batch {
+    ProtoEncodedRecordBatch proto_encoded_batch = 2;
+    JsonRecordBatch json_batch = 3;
+  }
+}
+
+message EphemeralStreamRequest {
+  oneof payload {
+    CreateIngestStreamRequest create_stream = 1;
+    IngestRecordRequest ingest_record = 2;
+    IngestRecordBatchRequest ingest_record_batch = 3;
+  }
+}
+
+message IngestRecordResponse {
+  // Cumulative durability acknowledgment.
+  optional int64 durability_ack_up_to_offset = 1;
+}
+
+message CloseStreamSignal {
+  optional google.protobuf.Duration duration = 1;
+}
+
+message EphemeralStreamResponse {
+  oneof payload {
+    CreateIngestStreamResponse create_stream_response = 1;
+    IngestRecordResponse ingest_record_response = 2;
+    CloseStreamSignal close_stream_signal = 3;
+  }
+}
+
+message CreatePersistentStreamRequest {
+  optional CreateIngestStreamRequest create_stream = 1;
+  reserved 2;
+  reserved "stream_name";
+}
+
+message ResumeIngestStreamRequest {
+  oneof identifier {
+    string stream_id = 1;
+  }
+  optional bytes descriptor_proto = 2;
+  optional RecordType record_type = 3;
+  reserved 4;
+  reserved "stream_name";
+}
+
+message ResumeIngestStreamResponse {
+  // Absent means nothing has committed yet; resume from offset zero.
+  optional int64 last_committed_offset = 1;
+}
+
+message PersistentStreamRequest {
+  oneof payload {
+    CreatePersistentStreamRequest create_stream = 1;
+    ResumeIngestStreamRequest resume_stream = 2;
+    IngestRecordRequest ingest_record = 3;
+    IngestRecordBatchRequest ingest_record_batch = 4;
+  }
+}
+
+message PersistentStreamResponse {
+  oneof payload {
+    CreateIngestStreamResponse create_stream_response = 1;
+    ResumeIngestStreamResponse resume_stream_response = 2;
+    IngestRecordResponse ingest_record_response = 3;
+    CloseStreamSignal close_stream_signal = 4;
+  }
+}
+
+message RetireStreamRequest {
+  optional string table_name = 1;
+  oneof identifier {
+    string stream_id = 2;
+  }
+  reserved 3;
+  reserved "stream_name";
+}
+
+message RetireStreamResponse {}
