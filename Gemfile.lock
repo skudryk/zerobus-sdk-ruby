@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    zerobus-sdk-ruby-sdk (0.1.0)
+    zerobus-sdk-ruby (0.1.0)
       base64 (>= 0.1, < 1.0)
       ethon (~> 0.19.1)
       typhoeus (~> 1.7)
@@ -29,7 +29,7 @@ DEPENDENCIES
   http-2 (~> 1.1)
   minitest (~> 5.0)
   rake (~> 13.0)
-  zerobus-sdk-ruby-sdk!
+  zerobus-sdk-ruby!
 
 BUNDLED WITH
    2.5.22
