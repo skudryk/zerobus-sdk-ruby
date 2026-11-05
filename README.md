@@ -430,3 +430,19 @@ with the same defaults. For explicit lifetime control, create a
 `Zerobus::Async::Executor`, pass it as `Future.new(executor: executor)`, and call
 `executor.shutdown` when finished. A future created inside a worker of the same
 executor runs on that worker to avoid waiting for capacity in its own pool.
+
+## Origin and attribution
+
+Ruby SDK for Databricks ZeroBus
+
+Copyright 2026 Serhii Kudryk
+Copyright 2025 Databricks
+
+
+This product (derivative work) provides Ruby port of software originally developed by Databricks
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+
+See [LICENSE](LICENSE) for the full license and [NOTICE](NOTICE) for the
+distributed attribution notice.
