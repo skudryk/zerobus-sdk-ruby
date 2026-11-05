@@ -28,8 +28,9 @@ module Zerobus
       @next_offset = 0
       @acked_offset = -1
       @state = :opening
-      @callbacks = Queue.new
-      @callback_errors = Queue.new
+      @callbacks = SizedQueue.new(options.callback_queue_capacity)
+      @pending_callbacks = 0
+      @callback_errors = []
       @callback_thread = Thread.new { run_callbacks } if options.ack_callback
       @worker = Thread.new { supervise }
       @worker.report_on_exception = false
@@ -46,7 +47,7 @@ module Zerobus
       @mutex.synchronize { @stop = true; @condition.broadcast } if @mutex
       @transport&.close
       @worker&.join(1)
-      @callbacks << nil
+      @callbacks&.close
       raise
     end
 
@@ -108,7 +109,7 @@ module Zerobus
 
       @transport&.close
       @worker.join(1) unless Thread.current == @worker
-      @callbacks << nil
+      @callbacks.close
       unless !@callback_thread || Thread.current == @callback_thread
         budget = options.callback_max_wait_time_ms
         budget.nil? ? @callback_thread.join : @callback_thread.join(budget / 1000.0)
@@ -131,9 +132,7 @@ module Zerobus
     def get_unacked_records = get_unacked_batches.flatten(1)
 
     def callback_errors
-      errors = []
-      errors << @callback_errors.pop(true) until @callback_errors.empty?
-      errors
+      @mutex.synchronize { @callback_errors.shift(@callback_errors.length) }
     end
 
     private
@@ -153,10 +152,15 @@ module Zerobus
         loop do
           raise @error if @error
           raise ClosedStreamError, 'stream is closed' if @closing || @stop
-          break if @inflight_used + count <= options.max_inflight_records
+          callback_capacity = !options.ack_callback || @pending_callbacks < options.callback_queue_capacity
+          break if @inflight_used + count <= options.max_inflight_records && callback_capacity
+
+          if Thread.current == @callback_thread
+            raise ZerobusException, 'callback cannot wait for ingestion capacity on its own stream'
+          end
 
           remaining = deadline - monotonic
-          raise TimeoutError, 'waiting for inflight capacity timed out' if remaining <= 0
+          raise TimeoutError, 'waiting for ingestion or callback capacity timed out' if remaining <= 0
 
           @condition.wait(@mutex, remaining)
         end
@@ -168,6 +172,9 @@ module Zerobus
         @pending[offset] = entry
         @unsent << entry
         @inflight_used += count
+        # Reserve delivery capacity before committing the submission. ACKs do
+        # not release it; the callback worker does so after invocation finishes.
+        @pending_callbacks += 1 if options.ack_callback
         @next_offset += 1
         @condition.broadcast
         offset
@@ -220,7 +227,7 @@ module Zerobus
       end
     ensure
       @mutex.synchronize { @condition.broadcast }
-      @callbacks << nil
+      @callbacks.close
     end
 
     def build_encoder(properties) = Encoder.new(properties)
@@ -280,6 +287,7 @@ module Zerobus
         end
 
         @mutex.synchronize do
+          raise ClosedStreamError, 'stream closed' if @stop || @error
           apply_handshake_locked(kind, value)
           @wire_next = @persistent ? @next_offset : 0
           @wire_map = {}
@@ -343,6 +351,10 @@ module Zerobus
       kind, value = decode_response(message)
 
       @mutex.synchronize do
+        # Terminal callbacks have already been published. A transport read that
+        # finishes during close must not ACK those submissions a second time.
+        return if @stop || @error
+
         case kind
         when :ack
           raise NonRetriableException, 'acknowledgment exceeds submitted offset' if value > @highest_wire_sent
@@ -374,7 +386,9 @@ module Zerobus
       while @pending.first && @pending.first[0] <= offset
         logical, entry = @pending.shift
         @inflight_used -= @persistent ? 1 : entry.records.size
-        @callbacks << [:ack, logical] if options.ack_callback
+        # Admission reserves a slot through callback completion, so a cumulative
+        # ACK can enqueue every event without waiting while holding @mutex.
+        @callbacks.push([:ack, logical], true) if options.ack_callback
       end
       @condition.broadcast
     end
@@ -384,17 +398,29 @@ module Zerobus
 
       @error = error
       @state = :failed
-      @pending.each_key { |offset| @callbacks << [:error, offset, error.message] } if options.ack_callback
+      if options.ack_callback
+        @pending.each_key { |offset| @callbacks.push([:error, offset, error.message], true) }
+      end
       @condition.broadcast
     end
 
     def run_callbacks
       while (event = @callbacks.pop)
+        failure = nil
         begin
           kind, offset, message = event
           kind == :ack ? options.ack_callback.on_ack(offset) : options.ack_callback.on_error(offset, message)
         rescue StandardError => error
-          @callback_errors << error
+          failure = error
+        ensure
+          @mutex.synchronize do
+            if failure
+              @callback_errors.shift if @callback_errors.length == options.callback_queue_capacity
+              @callback_errors << failure
+            end
+            @pending_callbacks -= 1
+            @condition.broadcast
+          end
         end
       end
     end

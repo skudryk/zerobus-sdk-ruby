@@ -249,7 +249,7 @@ Federation cannot be combined with client credentials.
 
 ## Options and callbacks
 
-`StreamConfigurationOptions.new` accepts the same row-stream options as in Databricks ZeroBus Python SDK:
+`StreamConfigurationOptions.new` configures row-stream behavior:
 
 | Option | Default |
 | --- | --- |
@@ -263,6 +263,7 @@ Federation cannot be combined with client credentials.
 | `stream_paused_max_wait_time_ms` | `nil` (server grace period) |
 | `callback_max_wait_time_ms` | 5,000 (`nil` waits indefinitely) |
 | `ack_callback` | `nil` |
+| `callback_queue_capacity` | 1,000 (positive integer) |
 | `record_type` | `RecordType::UNSPECIFIED` (infer from properties) |
 | `max_ingest_payload_bytes` | 10 MiB minus 64 KiB |
 
@@ -283,14 +284,48 @@ class Callback < Zerobus::AckCallback
     warn "Failed: #{offset}: #{message}"
   end
 end
-options = Zerobus::StreamConfigurationOptions.new(ack_callback: Callback.new)
+options = Zerobus::StreamConfigurationOptions.new(
+  ack_callback: Callback.new, callback_queue_capacity: 1000
+)
 ```
 
 Callbacks run in order on a separate thread, once per accepted submission,
-including one callback for a batch. Rejected inputs generate no callback.
-Callback exceptions are available through `stream.callback_errors` and do not
-fail ingestion. Close waits for callbacks up to the configured budget; callbacks
-may finish later if that budget expires. Callbacks should finish promptly.
+including one callback for a whole batch. Rejected inputs generate no callback.
+The callback queue is bounded and uses **blocking admission with reserved slots**:
+
+- Each accepted submission reserves one callback slot before receiving an offset.
+  The reservation covers time awaiting its ACK, waiting in the callback queue,
+  and executing its callback.
+- The slot is released only when `on_ack` or `on_error` returns or raises. Server
+  ACKs still release record inflight capacity immediately, but cannot release the
+  callback reservation.
+- Once `callback_queue_capacity` slots are reserved, ingestion waits in the caller
+  for a callback to finish, up to `flush_timeout_ms`. Timeout rejects that new
+  submission before allocating an offset; it generates no callback.
+- ACK processing and terminal-error delivery never wait for callback queue space
+  while holding the stream mutex. Every accepted submission already owns a slot;
+  callback events are neither dropped nor coalesced.
+
+This limit applies only when `ack_callback` is set. It is separate from
+`max_inflight_records`; a multi-record batch still reserves just one callback slot.
+Persistent streams expose the same setting through `.callback_queue_capacity(n)`.
+`flush` and `wait_for_offset` confirm durability and do not wait for callbacks.
+
+`close` stops callback admission and closes the queue after publishing all accepted
+submissions' events. The callback worker drains those events in order. The
+`callback_max_wait_time_ms` budget limits how long close waits for that drain;
+expiration does not discard events or stop the worker. Delivery can continue after
+close returns while the process remains running. Use `nil` to wait indefinitely.
+
+Callback exceptions do not fail ingestion or strand capacity. `stream.callback_errors`
+returns and clears retained exception diagnostics. To bound memory even when every
+callback raises, only the most recent `callback_queue_capacity` exceptions are
+retained; older diagnostics are evicted without skipping callback invocations.
+Callbacks may query or close their stream. A synchronous submission from a callback
+on the same stream raises immediately if it would have to wait for capacity,
+avoiding a wait on its own completion. A callback should not wait on an async
+submission to its own stream, since that operation can need the callback slot
+still held by the callback. Callback code should finish promptly.
 
 ## Persistent streams (experimental)
 

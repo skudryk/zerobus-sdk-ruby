@@ -45,7 +45,8 @@ module Zerobus
       recovery_backoff_ms: 2_000, recovery_retries: 4, server_lack_of_ack_timeout_ms: 60_000,
       flush_timeout_ms: 300_000, record_type: RecordType::UNSPECIFIED,
       stream_paused_max_wait_time_ms: nil, callback_max_wait_time_ms: 5_000,
-      ack_callback: nil, max_ingest_payload_bytes: 10 * 1024 * 1024 - 64 * 1024
+      ack_callback: nil, callback_queue_capacity: 1000,
+      max_ingest_payload_bytes: 10 * 1024 * 1024 - 64 * 1024
     }.freeze
 
     DEFAULTS.each_key { |key| attr_reader key }
@@ -55,9 +56,9 @@ module Zerobus
       raise ArgumentError, "unknown options: #{unknown.join(', ')}" unless unknown.empty?
 
       DEFAULTS.merge(options).each do |key, value|
-        if key.to_s.end_with?('_ms', '_bytes') || [:max_inflight_records, :recovery_retries].include?(key)
+        if key.to_s.end_with?('_ms', '_bytes') || [:max_inflight_records, :recovery_retries, :callback_queue_capacity].include?(key)
           nullable = [:stream_paused_max_wait_time_ms, :callback_max_wait_time_ms].include?(key)
-          minimum = key == :max_inflight_records ? 1 : 0
+          minimum = [:max_inflight_records, :callback_queue_capacity].include?(key) ? 1 : 0
           raise ArgumentError, "#{key} must be an integer >= #{minimum}" unless (nullable && value.nil?) || (value.is_a?(Integer) && value >= minimum)
         end
         instance_variable_set("@#{key}", value)

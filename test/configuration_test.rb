@@ -15,6 +15,9 @@ class ConfigurationTest < Minitest::Test
       [-1, '1', true, 1.5].each { |value| assert_raises(ArgumentError) { options(**{key => value}) } }
     end
     assert_raises(ArgumentError) { options(max_inflight_records: 0) }
+    [0, -1, true, nil, '1', 1.5].each do |value|
+      assert_raises(ArgumentError) { options(callback_queue_capacity: value) }
+    end
     assert_raises(ArgumentError) { options(recovery: 0) }
     assert_raises(ArgumentError) { options(unknown: 1) }
     assert_raises(ArgumentError) { options(record_type: 4) }
