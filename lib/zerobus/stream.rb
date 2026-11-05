@@ -279,7 +279,12 @@ module Zerobus
         raise TimeoutError, 'stream handshake timed out' if remaining <= 0
 
         message = @transport.next_message(timeout: [remaining, 0.1].min)
-        next unless message
+        unless message
+          if @transport.respond_to?(:completed?) && @transport.completed?
+            raise ZerobusException, 'server ended gRPC stream before handshake completed'
+          end
+          next
+        end
 
         kind, value = decode_response(message)
         unless handshake_kinds.include?(kind)
