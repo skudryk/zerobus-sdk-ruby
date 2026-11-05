@@ -191,26 +191,46 @@ Each `ingest` also returns the record's offset, and `wait_for_offset(offset)` bl
 
 See each SDK's README for exact method names and a runnable example.
 
-## HTTP Proxy Support
+## Proxy configuration (libcurl)
 
-All SDKs support HTTP CONNECT proxies via environment variables, following gRPC core conventions. The first variable found (in order) is used:
+With the default Typhoeus configuration, this Ruby SDK delegates proxy selection
+to libcurl for both gRPC ingestion and OAuth token requests. The request URL's
+scheme determines which variable applies; using gRPC over HTTPS still selects
+`https_proxy`. See [libcurl's environment-variable documentation](https://curl.se/libcurl/c/libcurl-env.html).
 
-| Proxy                         | No-proxy                          |
-| ----------------------------- | --------------------------------- |
-| `grpc_proxy` / `GRPC_PROXY`   | `no_grpc_proxy` / `NO_GRPC_PROXY` |
-| `https_proxy` / `HTTPS_PROXY` | `no_proxy` / `NO_PROXY`           |
-| `http_proxy` / `HTTP_PROXY`   |                                   |
+| Request URL | Proxy lookup order (first nonempty value) |
+| --- | --- |
+| `https://` (Zerobus and workspace endpoints) | `https_proxy`, `HTTPS_PROXY`, `all_proxy`, `ALL_PROXY` |
+| `http://` (local development) | `http_proxy`, `all_proxy`, `ALL_PROXY` |
 
-The `no_proxy` value is a comma-separated list of hostnames (suffix-matched) or `*` to bypass the proxy entirely.
+Lowercase names take precedence over uppercase names. On systems with
+case-sensitive environment variables, including Linux and macOS, `HTTP_PROXY` is
+ignored; use `http_proxy`. `http_proxy` is not a fallback for an HTTPS URL.
+Scheme-specific settings take precedence over `all_proxy` / `ALL_PROXY`.
+
+The variables `grpc_proxy`, `GRPC_PROXY`, `no_grpc_proxy`, and `NO_GRPC_PROXY` are
+**not supported** by this SDK. A deployment using them must migrate to the
+libcurl variables above. There is no gRPC-core proxy-variable precedence layer.
+
+For bypasses, libcurl checks `no_proxy` before `NO_PROXY`. Its comma-separated
+list accepts hostnames and IP addresses. A domain entry such as `example.com`
+matches that host and its subdomains, but not `otherexample.com`. Set the value
+to `*` to bypass proxies for all hosts; patterns such as `*.example.com` are not
+supported. IPv6 literals are written without brackets. IP network ranges in CIDR
+notation require libcurl 7.86.0 or later. See [libcurl's bypass rules](https://curl.se/libcurl/c/CURLOPT_NOPROXY.html).
 
 ```bash
 export https_proxy=http://my-proxy:8080
-export no_proxy=localhost,127.0.0.1
+export no_proxy=localhost,127.0.0.1,::1
 ```
 
-The SDK establishes a plaintext HTTP CONNECT tunnel through the proxy, then performs a TLS handshake end-to-end with the Databricks server. The proxy never sees decrypted traffic.
-
-
+For HTTPS destinations through an HTTP proxy, libcurl uses an HTTP CONNECT tunnel
+and then establishes TLS to the destination, with certificate and hostname
+verification enabled. Other proxy schemes depend on the installed libcurl build;
+see [libcurl's proxy documentation](https://curl.se/libcurl/c/CURLOPT_PROXY.html).
+These settings apply to the Zerobus endpoint and the workspace token endpoint
+independently, so the bypass list should cover each destination that needs a
+direct connection.
 
 ## Authentication
 
