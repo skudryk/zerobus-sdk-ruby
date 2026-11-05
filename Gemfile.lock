@@ -1,0 +1,35 @@
+PATH
+  remote: .
+  specs:
+    zerobus-sdk-ruby-sdk (0.1.0)
+      base64 (>= 0.1, < 1.0)
+      ethon (~> 0.19.1)
+      typhoeus (~> 1.7)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    base64 (0.3.0)
+    ethon (0.19.1)
+      ffi (>= 1.15.0)
+      logger
+    ffi (1.17.4-x86_64-linux-gnu)
+    http-2 (1.3.0)
+    logger (1.7.0)
+    minitest (5.27.0)
+    rake (13.4.2)
+    typhoeus (1.7.1)
+      ethon (>= 0.19.1, < 0.20.0)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  http-2 (~> 1.1)
+  minitest (~> 5.0)
+  rake (~> 13.0)
+  zerobus-sdk-ruby-sdk!
+
+BUNDLED WITH
+   2.5.22
