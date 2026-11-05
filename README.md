@@ -327,19 +327,51 @@ server's persistent-stream contract and consistent application checkpointing.
 
 ## Asynchronous API
 
-`Zerobus::Async::ZerobusSdk` exposes the same ingestion operations through
-thread-backed `Future` objects. `.value` (or `.wait`) returns the result or raises
-the original exception. This uses Ruby threads . 
-Submission order among concurrent calls is their admission order.
+`Zerobus::Async::ZerobusSdk` exposes ingestion operations through `Future` objects.
+`.value` (or `.wait`) returns the result or raises the original exception. Each
+async SDK owns a fixed worker pool shared by its streams, persistent builders,
+recreation and retirement operations. By default it has **4 workers** and a queue
+for **1,000 waiting operations**. Set `worker_count` and `queue_capacity` to positive
+integers when constructing the SDK to change those limits.
+
+When the queue is full, submitting another operation blocks the calling thread
+until a queue slot becomes available. Submission therefore applies backpressure
+before returning a future, rather than creating another thread to wait for stream
+capacity. `max_inflight_records` still limits records admitted to the stream;
+`queue_capacity` separately limits operations waiting for an async worker. Concurrent
+operations may be admitted to a stream in a different order from their submission.
 
 ```ruby
-sdk = Zerobus::Async::ZerobusSdk.new(host: endpoint, unity_catalog_url: workspace)
-stream = sdk.create_stream(table_properties: props, headers_provider: provider).value
-offset = stream.ingest_record_offset('{"value":42}').value
-stream.wait_for_offset(offset).value
-stream.close.value
+sdk = Zerobus::Async::ZerobusSdk.new(
+  host: endpoint, unity_catalog_url: workspace,
+  worker_count: 4, queue_capacity: 1000
+)
+begin
+  stream = sdk.create_stream(table_properties: props, headers_provider: provider).value
+  begin
+    offset = stream.ingest_record_offset('{"value":42}').value
+    stream.wait_for_offset(offset).value
+  ensure
+    stream.close.value
+  end
+ensure
+  sdk.shutdown
+end
 ```
 
-`future.value(timeout: seconds)` bounds only the caller's wait; it does not cancel
-the queued work. Always wait for operations and close streams to release resources.
+Close streams before calling `sdk.shutdown`. Shutdown stops accepting work, wakes
+callers blocked on a full queue with `Zerobus::Async::ExecutorShutdownError`, drains
+accepted operations, and waits for the workers to exit. `sdk.shutdown(wait: false)`
+initiates the same drain without waiting for worker exit. It does not close streams
+or cancel running operations; outstanding waits retain their stream timeouts.
 
+`future.value(timeout: seconds)` bounds only the caller's wait; it does not cancel
+the queued work or bound submission time when the work queue is full. A future
+stores its result independently of the worker, so multiple callers may wait for
+it, and task failures do not terminate workers.
+
+Standalone `Zerobus::Future.new { ... }` calls share a process-wide bounded pool
+with the same defaults. For explicit lifetime control, create a
+`Zerobus::Async::Executor`, pass it as `Future.new(executor: executor)`, and call
+`executor.shutdown` when finished. A future created inside a worker of the same
+executor runs on that worker to avoid waiting for capacity in its own pool.
